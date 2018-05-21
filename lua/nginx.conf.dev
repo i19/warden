@@ -1,0 +1,85 @@
+worker_processes  4;
+
+error_log /var/log/openresty_error.log debug;
+
+events {
+    worker_connections  1024;
+}
+
+http {
+    #线上开启，否则每次都会创建lua vm [必须指定]
+    lua_code_cache on;              
+    #定义xulb用到的共享内存名 [必须指定]
+    lua_shared_dict xulb_dict 10m;  
+    #包路径 [必须指定]
+    lua_package_path "/usr/local/etc/openresty/lua/?.lua;;"; 
+    #master加载配置时入口 [必须指定]
+    init_by_lua_file /usr/local/etc/openresty/lua/xulb/init_by_lua.lua; 
+    #worker加载配置时入口 [必须指定]
+    init_worker_by_lua_file /usr/local/etc/openresty/lua/xulb/init_worker_by_lua.lua;  
+
+    include mime.types;
+    default_type  application/octet-stream;
+    types {
+        text/plain cur;
+    }
+
+    map $host $xqtime {
+        default '';
+    }
+    map $host $upstream {
+        default 'UPSTREAM';
+    }
+
+    #获取响应码做被动检查 [必须指定]
+    header_filter_by_lua_block {
+        local CheckNode = require "xulb.api.check_node"
+        CheckNode:check()
+    }
+
+    proxy_next_upstream error timeout http_500 http_502;
+    proxy_next_upstream_tries 3;
+
+    #upstream [必须指定]
+    upstream test_proj {
+        server 0.0.0.1;
+        balancer_by_lua_block {
+            local balancer = require "xulb.api.balancer"
+            balancer:connect("test_proj")
+        }
+    }
+
+    server {
+        listen       81;
+        server_name  localhost;
+        
+
+        location / {
+            root   html;
+            index  index.html index.htm;
+        }
+
+        error_page   500 502 503 504  /50x.html;
+        location = /50x.html {
+            root   html;
+        }
+
+        #与api-server交互的配置更新接口 [必须指定]
+        location = /xulb_sync_config {
+            content_by_lua_file /usr/local/etc/openresty/lua/xulb/api/sync_config.lua;
+        }
+
+        #api-server主动健康检查启用，禁用upstream交互的接口 [必须指定]
+        location = /xulb_upstream_up_down {
+            content_by_lua_file /usr/local/etc/openresty/lua/xulb/api/upstream_up_down.lua;
+        }
+
+        #测试用location
+	    location = /intf {
+            proxy_next_upstream error timeout http_404;
+            proxy_intercept_errors on;
+            proxy_pass http://test_proj;
+            break;
+        }
+    }
+}
